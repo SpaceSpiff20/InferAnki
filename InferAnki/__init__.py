@@ -7,10 +7,10 @@ import re
 from datetime import datetime
 
 # Import addon modules
-from .functions.tts_handler import ElevenLabsTTSProcessor 
+from .functions.tts_handler import SpeechifyTTSProcessor 
 
 # Create alias for backward compatibility
-TTSProcessor = ElevenLabsTTSProcessor
+TTSProcessor = SpeechifyTTSProcessor
 
 # Addon configuration
 ADDON_NAME = "InferAnki"

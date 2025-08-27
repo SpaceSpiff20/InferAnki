@@ -2,6 +2,7 @@ import os
 import re
 import tempfile
 import json
+import base64
 from datetime import datetime
 from pathlib import Path
 
@@ -19,68 +20,67 @@ except ImportError:
     mw = None
     ANKI_AVAILABLE = False
 
-# ElevenLabs API imports
+# Speechify API imports
 try:
-    import requests
-    REQUESTS_AVAILABLE = True
+    from speechify import Speechify
+    from speechify.tts import GetSpeechOptionsRequest
+    SPEECHIFY_AVAILABLE = True
 except ImportError:
-    REQUESTS_AVAILABLE = False
+    SPEECHIFY_AVAILABLE = False
 
-class ElevenLabsTTSProcessor:
-    """Handle ElevenLabs TTS processing for Anki cards with Norwegian optimization"""
+class SpeechifyTTSProcessor:
+    """Handle Speechify TTS processing for Anki cards with Norwegian optimization"""
     
     def __init__(self, config):
         self.config = config
-        self.language = config.get("tts_language", "nor")  # Norwegian ISO 639-3 code
+        self.language = config.get("tts_language", "no")  # Norwegian ISO 639-3 code
         self.enabled = config.get("tts_enabled", True)
-        self.max_chars = config.get("tts_max_chars", 40000)  # Flash v2.5 supports 40,000 chars
+        self.max_chars = config.get("tts_max_chars", 40000)  # Speechify supports large text
         self.field_index = 1  # Always use field index 1 (second field) for TTS
         
-        # ElevenLabs TTS configuration
-        self.api_key = config.get("elevenlabs_api_key", "")
-        self.voice_id = config.get("elevenlabs_voice_id", "")  # Will be set based on voice name
+        # Speechify TTS configuration
+        self.api_key = config.get("speechify_api_key", "")
+        self.voice_id = config.get("speechify_voice_id", "scott")  # Default to scott
         self.voice_name = config.get("tts_voice", "Emma")  # Default to Emma (Norwegian native)
-        self.model = config.get("elevenlabs_model", "eleven_flash_v2_5")  # Flash v2.5 with Norwegian support
-        self.language_code = config.get("elevenlabs_language_code", "no")  # ISO 639-1 code (no=Norwegian, en=English)
-        self.stability = config.get("elevenlabs_stability", 0.75)  # Stable for consistent quality
-        self.similarity_boost = config.get("elevenlabs_similarity_boost", 0.75)
-        self.style = config.get("elevenlabs_style", 0.0)
-        self.use_speaker_boost = config.get("elevenlabs_speaker_boost", True)
+        self.model = config.get("speechify_model", "simba-multilingual")  # Multilingual model for Norwegian support
+        self.language_code = config.get("speechify_language_code", "nb-NO")  # Norwegian Bokmål
+        self.audio_format = config.get("speechify_audio_format", "mp3")
+        
+        # Speechify advanced options
+        self.loudness_normalization = config.get("speechify_loudness_normalization", True)
+        self.text_normalization = config.get("speechify_text_normalization", True)
+        
+        # Backward compatibility with ElevenLabs settings
         self.speech_rate = config.get("elevenlabs_speech_rate", 0.8)  # Speech rate: 0.5-2.0 (0.8 = 20% slower)
         
-        # Output format optimization for smaller files
-        self.output_format = config.get("elevenlabs_output_format", "mp3_22050_64")  # Smaller, good quality
-        
-        # Privacy and performance settings
-        self.enable_logging = config.get("elevenlabs_enable_logging", False)  # Disable for privacy
-        self.seed = config.get("elevenlabs_seed", None)  # Deterministic generation
-        
-        # Norwegian voice recommendations (including native speakers)
+        # Norwegian voice recommendations for Speechify
         self.norwegian_voices = {
-            "Emma": "b3jcIbyC3BSnaRu8avEk",       # 🇳🇴 Native from Bergen! (recommended)
-            "Rachel": "21m00Tcm4TlvDq8ikWAM",     # Female, clear, versatile
-            "Domi": "AZnzlk1XvdvUeBnXmlld",       # Female, young, energetic  
-            "Bella": "EXAVITQu4vr4xnSDxMaL",      # Female, calm, mature
-            "Antoni": "ErXwobaYiN019PkySvjV",     # Male, deep, professional
-            "Josh": "TxGEqnHWrfWFTfGW9XjX",       # Male, young, friendly
-            "Arnold": "VR6AewLTigWG4xSOukaG",     # Male, mature, authoritative
-            "Adam": "pNInz6obpgDQGcFmaJgB",       # Male, deep, narrator
-            "Sam": "yoZ06aMxZJJ28mfd3POQ"         # Male, casual, conversational
+            "Emma": "scott",       # Default Norwegian voice
+            "Rachel": "scott",     # Fallback to scott
+            "Domi": "scott",       # Fallback to scott
+            "Bella": "scott",      # Fallback to scott
+            "Antoni": "scott",     # Fallback to scott
+            "Josh": "scott",       # Fallback to scott
+            "Arnold": "scott",     # Fallback to scott
+            "Adam": "scott",       # Fallback to scott
+            "Sam": "scott"         # Fallback to scott
         }
         
-        # Set voice ID based on voice name
-        if self.voice_name in self.norwegian_voices:
-            self.voice_id = self.norwegian_voices[self.voice_name]
-        elif not self.voice_id:
-            self.voice_id = self.norwegian_voices["Emma"]  # Default to Emma from Bergen
-          # Check API availability
-        if not REQUESTS_AVAILABLE:
-            showCritical("ElevenLabs TTS requires 'requests' library")
+        # Set voice ID based on voice name (only if no custom voice_id is provided)
+        if not self.voice_id or self.voice_id == "scott":
+            if self.voice_name in self.norwegian_voices:
+                self.voice_id = self.norwegian_voices[self.voice_name]
+            else:
+                self.voice_id = "scott"  # Default to scott
+        
+        # Check API availability
+        if not SPEECHIFY_AVAILABLE:
+            showCritical("Speechify TTS requires 'speechify-api' library")
             self.enabled = False
         elif not self.api_key or self.api_key == "your-api-key-here":
             if config.get("debug_mode", False):
-                showInfo("ElevenLabs API key not configured in config.json")
-                
+                showInfo("Speechify API key not configured in config.json")
+    
     def process_text_for_tts(self, text):
         """Process text with comprehensive HTML cleaning for Norwegian TTS"""
         if not text or not isinstance(text, str):
@@ -88,7 +88,7 @@ class ElevenLabsTTSProcessor:
         input_text = text.strip()
         
         # DEBUG: Add version marker to logs to confirm new code is running
-        debug_marker = " [v0.3.22-FIXED]"
+        debug_marker = " [v0.6.0-SPEECHIFY]"
         
         # FIRST: Remove 🔸 bullet content (improved logic)
         # Pattern 1: 🔸 content with <br><br> ending
@@ -138,7 +138,8 @@ class ElevenLabsTTSProcessor:
         # FIFTH: Now convert remaining HTML entities that could interfere with text
         input_text = input_text.replace('&lt;', '<')
         input_text = input_text.replace('&gt;', '>')
-          # SIXTH: Norwegian text processing
+        
+        # SIXTH: Norwegian text processing
         # Handle pipe-separated words (Norwegian learning) - convert all | to commas
         input_text = re.sub(r'\s*\|\s*', ', ', input_text)
         
@@ -164,7 +165,8 @@ class ElevenLabsTTSProcessor:
         # SEVENTH: Clean up spacing and whitespace
         input_text = re.sub(r'\s+', ' ', input_text)  # Multiple spaces to single
         input_text = input_text.strip()
-          # LOG: Record processed text with version marker
+        
+        # LOG: Record processed text with version marker
         if self.config.get("debug_mode", False):
             try:
                 logs_dir = r"a:\KODEKRAFT\PROJECTS\InferAnki\logs"
@@ -188,8 +190,8 @@ class ElevenLabsTTSProcessor:
         return input_text
     
     def create_audio_file(self, text):
-        """Create MP3 audio file using ElevenLabs TTS"""
-        if not self.enabled or not REQUESTS_AVAILABLE:
+        """Create MP3 audio file using Speechify TTS"""
+        if not self.enabled or not SPEECHIFY_AVAILABLE:
             return None
             
         try:
@@ -198,59 +200,42 @@ class ElevenLabsTTSProcessor:
             if not processed_text or not processed_text.strip():
                 return None
             
-            # ElevenLabs API endpoint with privacy setting
-            url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/stream?enable_logging=false"
-            headers = {
-                "xi-api-key": self.api_key,
-                "Content-Type": "application/json"
-            }
-            data = {
-                "text": processed_text,
-                "model_id": self.model,
-                "language_code": self.language_code,  # Language code from config (no=Norwegian, en=English)
-                "voice_settings": {
-                    "stability": self.stability,  # type: ignore
-                    "similarity_boost": self.similarity_boost,
-                    "style": self.style,
-                    "use_speaker_boost": self.use_speaker_boost
-                },
-                "apply_text_normalization": "auto"  # Auto text normalization
-            }
+            # Initialize Speechify client
+            client = Speechify(token=self.api_key)
             
-            # Make API request with timeout
-            response = requests.post(url, headers=headers, json=data, timeout=30, stream=True)
+            # Prepare options
+            options = GetSpeechOptionsRequest(
+                loudness_normalization=self.loudness_normalization,
+                text_normalization=self.text_normalization
+            )
             
-            if response.status_code != 200:
-                error_msg = f"ElevenLabs TTS API error: {response.status_code}"
-                try:
-                    error_details = response.json()
-                    error_msg += f" - {error_details.get('detail', 'Unknown error')}"
-                except:
-                    pass
-                showCritical(error_msg)
-                return None
+            # Make TTS request
+            audio_response = client.tts.audio.speech(
+                audio_format=self.audio_format,
+                input=processed_text,
+                language=self.language_code,
+                model=self.model,
+                options=options,
+                voice_id=self.voice_id
+            )
+            
+            # Decode audio data
+            audio_bytes = base64.b64decode(audio_response.audio_data)
             
             # Create temporary file
             now = datetime.now().strftime('%y%m%d-%H%M%S')
-            filename = f"inferanki-elevenlabs-tts-{now}.mp3"
+            filename = f"inferanki-speechify-tts-{now}.{self.audio_format}"
             temp_dir = tempfile.gettempdir()
             temp_path = os.path.join(temp_dir, filename)
             
             # Save audio file
             with open(temp_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
+                f.write(audio_bytes)
             
             return temp_path
             
-        except requests.exceptions.Timeout:
-            showCritical("ElevenLabs TTS request timed out (30 seconds). Try with shorter text.")
-            return None
-        except requests.exceptions.RequestException as e:
-            showCritical(f"Network error with ElevenLabs TTS: {str(e)}")
-            return None
         except Exception as e:
-            showCritical(f"Error creating ElevenLabs TTS audio: {str(e)}")
+            showCritical(f"Error creating Speechify TTS audio: {str(e)}")
             return None
     
     def get_field_content(self, editor):
@@ -319,15 +304,15 @@ class ElevenLabsTTSProcessor:
     def process_text(self, editor):
         """Main TTS processing function"""
         if not self.enabled:
-            showInfo("ElevenLabs TTS is disabled in configuration")
+            showInfo("Speechify TTS is disabled in configuration")
             return False
             
-        if not REQUESTS_AVAILABLE:
-            showCritical("ElevenLabs TTS requires 'requests' library")
+        if not SPEECHIFY_AVAILABLE:
+            showCritical("Speechify TTS requires 'speechify-api' library")
             return False
         
         if not self.api_key or self.api_key == "your-api-key-here":
-            showCritical("ElevenLabs API key not configured. Please add 'elevenlabs_api_key' to config.json")
+            showCritical("Speechify API key not configured. Please add 'speechify_api_key' to config.json")
             return False
             
         try:
@@ -371,9 +356,10 @@ class ElevenLabsTTSProcessor:
                 return False
                 
         except Exception as e:
-            showCritical(f"ElevenLabs TTS processing error: {str(e)}")
+            showCritical(f"Speechify TTS processing error: {str(e)}")
             return False
 
-# Maintain backward compatibility
-TTSHandler = ElevenLabsTTSProcessor
-TTSProcessor = ElevenLabsTTSProcessor
+# Maintain backward compatibility with old class names
+ElevenLabsTTSProcessor = SpeechifyTTSProcessor
+TTSHandler = SpeechifyTTSProcessor
+TTSProcessor = SpeechifyTTSProcessor
